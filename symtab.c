@@ -16,18 +16,17 @@
 #include <stdbool.h>
 
 struct symbol_s {
-	bool		is_lib;
 	uintptr_t	address;
 	size_t		size;
-	char		*name;
+	const char	*name;
+	const char	*path;
 };
 
-static uintptr_t lib_start, lib_end;
-static struct symbol_s symbol_table[10000];
+static struct symbol_s symbol_table[100000]; /* increase this if need */
 static int symbol_count;
 
 static int symtab_build_section(Elf *elf, Elf_Scn *section,
-		uintptr_t offset, uintptr_t base_addr)
+		uintptr_t offset, uintptr_t base_addr, const char *path)
 {
 	GElf_Shdr shdr;
 	if (gelf_getshdr(section, &shdr) == NULL) {
@@ -55,9 +54,13 @@ static int symtab_build_section(Elf *elf, Elf_Scn *section,
 			continue;
 		}
 
+		if (symbol_count >= sizeof(symbol_table) / sizeof(struct symbol_s)) {
+			abort();
+		}
+
 		struct symbol_s *sym = &symbol_table[symbol_count++];
 
-		sym->is_lib = false;
+		sym->path = path;
 		sym->name = strdup(elf_strptr(elf, shdr.sh_link, (size_t)esym.st_name));
 		sym->address = esym.st_value - base_addr + offset;
 		sym->size = esym.st_size;
@@ -65,6 +68,25 @@ static int symtab_build_section(Elf *elf, Elf_Scn *section,
 		count++;
 	}
 	return count;
+}
+
+static uintptr_t symtab_elf_base(Elf *elf)
+{
+	size_t i, n;
+
+	elf_getphdrnum(elf, &n);
+	if (n == 0) {
+		return 0;
+	}
+
+	for (i = 0; i < n; i ++) {
+		GElf_Phdr header;
+		gelf_getphdr(elf, i, &header);
+		if (header.p_type == PT_LOAD) {
+			return header.p_vaddr;
+		}
+	}
+	return 0;
 }
 
 static int symtab_build_file(const char *path, uintptr_t start, uintptr_t end)
@@ -82,17 +104,19 @@ static int symtab_build_file(const char *path, uintptr_t start, uintptr_t end)
 		return -1;
 	}
 
+	uintptr_t offset = 0, base_addr = 0;
 	GElf_Ehdr hdr;
 	gelf_getehdr(elf, &hdr);
-	if (hdr.e_type == ET_DYN) {
-		return 0;
+	if (hdr.e_type == ET_DYN) { /* only for dynamic library, but not executable */
+		offset = start; /* offset in process */
+		base_addr = symtab_elf_base(elf); /* base address of library */
 	}
 
 	/* find symbol section */
 	Elf_Scn* section = NULL;
 	int count = 0;
 	while ((section = elf_nextscn(elf, section)) != NULL) {
-		count += symtab_build_section(elf, section, 0, 0);
+		count += symtab_build_section(elf, section, offset, base_addr, path);
 	}
 
 	/* clean up */
@@ -158,16 +182,20 @@ int symtab_build(pid_t pid)
 {
 	const char *path;
 	size_t start, end;
-	int exe_self, count = 0;
+	int exe_self;
 	while ((path = proc_maps(pid, &start, &end, &exe_self)) != NULL) {
 
-		if (exe_self) {
-			count = symtab_build_file(path, start, end);
+		path = strdup(path);
 
-		} else {
+		int count = symtab_build_file(path, start, end);
+
+		if (count == 0) {
+			if (exe_self) {
+				return 0;
+			}
 			struct symbol_s *sym = &symbol_table[symbol_count++];
-			sym->is_lib = true;
-			sym->name = strdup(path);
+			sym->name = NULL;
+			sym->path = path;
 			sym->address = start;
 			sym->size = end - start;
 		}
@@ -175,10 +203,10 @@ int symtab_build(pid_t pid)
 
 	/* finish */
 	qsort(symbol_table, symbol_count, sizeof(struct symbol_s), symbol_cmp);
-	return count;
+	return symbol_count;
 }
 
-const char *symtab_get(uintptr_t address, int *offset, bool *is_lib)
+const char *symtab_get(uintptr_t address, int *offset, const char **path)
 {
 	int min = 0, max = symbol_count - 1;
 	while (min <= max) {
@@ -190,14 +218,9 @@ const char *symtab_get(uintptr_t address, int *offset, bool *is_lib)
 			min = mid + 1;
 		} else {
 			*offset = address - sym->address;
-			*is_lib = sym->is_lib;
+			*path = sym->path;
 			return sym->name;
 		}
 	}
 	return NULL;
-}
-
-bool symtab_is_lib(uintptr_t address)
-{
-	return (address >= lib_start) && (address <= lib_end);
 }

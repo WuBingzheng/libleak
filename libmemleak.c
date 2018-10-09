@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <dlfcn.h>
 #include <pthread.h>
 #include <string.h>
@@ -85,6 +86,8 @@ static bool leak_callstack_equal(const void *a, const void *b)
 
 static void leak_callstack_print(struct leak_callstack *cs)
 {
+	bool begin = true;
+
 	for (int i = 0; i < cs->ip_num; i++) {
 		uintptr_t address = cs->ips[i];
 		if (address == 0) {
@@ -92,16 +95,24 @@ static void leak_callstack_print(struct leak_callstack *cs)
 		}
 
 		int offset;
-		bool is_lib;
-		const char *proc_name = symtab_get(address, &offset, &is_lib);
+		const char *path;
+		const char *name = symtab_get(address, &offset, &path);
 
-		if (proc_name == NULL) {
-			fprintf(leak_log_filp, "    0x%016zx\n", address);
-		} else if (is_lib) {
-			fprintf(leak_log_filp, "    0x%016zx  %s\n", address, proc_name);
+		if (name == NULL) {
+			fprintf(leak_log_filp, "    0x%016zx  %s\n", address, path);
 		} else {
-			fprintf(leak_log_filp, "    0x%016zx  %s()+%d\n", address, proc_name, offset);
-			if (strcmp(proc_name, "main") == 0) {
+			if (begin) {
+				if (memcmp(name, "leak_", 5) == 0) {
+					continue;
+				} else {
+					begin = false;
+				}
+			}
+
+			fprintf(leak_log_filp, "    0x%016zx  %s  %s()+%d\n",
+					address, path, name, offset);
+
+			if (strcmp(name, "main") == 0) {
 				break;
 			}
 		}
@@ -122,6 +133,36 @@ static bool leak_memblock_equal(const void *a, const void *b)
 }
 
 
+static uint8_t tmp_buffer[1024000]; /* increase this if need */
+static uint8_t *tmp_buf_pos = tmp_buffer;
+static void *tmp_malloc(size_t size)
+{
+	size = (size + 7) / 8 * 8;
+	if (size > sizeof(tmp_buffer) - (tmp_buf_pos - tmp_buffer)) {
+		abort();
+	}
+	void *p = tmp_buf_pos;
+	tmp_buf_pos += size;
+	return p;
+}
+static void *tmp_calloc(size_t n, size_t size)
+{
+	void *p = tmp_malloc(n * size);
+	bzero(p, n * size);
+	return p;
+}
+static void *tmp_realloc(void *oldp, size_t size)
+{
+	void *newp = tmp_malloc(size);
+	memcpy(newp, oldp, size);
+	return newp;
+}
+static bool tmp_free(void *p)
+{
+	return (p >= (void *)tmp_buffer) && (p <= (void *)tmp_buffer + sizeof(tmp_buffer));
+}
+
+
 static void __attribute__((constructor))init(void)
 {
 	/* symbols */
@@ -137,7 +178,7 @@ static void __attribute__((constructor))init(void)
 	leak_real_free = dlsym(RTLD_NEXT, "free");
 	assert(leak_real_free != NULL);
 
-	/**/
+	/* dict */
 	leak_callstack_dict = wuy_dict_new_func(leak_callstack_hash,
 			leak_callstack_equal,
 			offsetof(struct leak_callstack, dict_node));
@@ -157,29 +198,30 @@ static void __attribute__((constructor))init(void)
 
 	/* debug info */
 	int count = symtab_build(pid);
+	if (count == 0) {
+		fprintf(stderr, "exit for no debug symbol found.\n");
+		fprintf(leak_log_filp, "exit for no debug symbol found.\n");
+		exit(123);
+	}
+
 	fprintf(leak_log_filp, "load symbols: %d\n", count);
+	fflush(leak_log_filp);
 
 	leak_inited = true;
 }
 
-static void leak_routine(void)
+static void leak_expire(void)
 {
 	time_t now = time(NULL);
-
-	if (leak_in_process) {
-		return;
-	}
 
 	if (pthread_mutex_trylock(&leak_memblock_mutex) != 0) {
 		return;
 	}
 
-	leak_in_process = true;
-
 	wuy_list_node_t *node, *safe;
 	wuy_list_iter_safe(&leak_memblock_list, node, safe) {
 		struct leak_memblock *mb = wuy_containerof(node, struct leak_memblock, list_node);
-		if (now - mb->create < 10) {
+		if (now - mb->create < 10) { /* change this by your application scenario */
 			break;
 		}
 
@@ -192,7 +234,7 @@ static void leak_routine(void)
 					cs->id, mb->size);
 			leak_callstack_print(cs);
 		} else {
-			fprintf(leak_log_filp, "callstack[%d] expires (size=%ld,%ld) again: %d\n",
+			fprintf(leak_log_filp, "callstack[%d] expires (size=%ld;%ld) again: %d\n",
 					cs->id, mb->size, cs->expired_size, cs->expired_count);
 		}
 
@@ -202,8 +244,6 @@ static void leak_routine(void)
 	pthread_mutex_unlock(&leak_memblock_mutex);
 
 	fflush(leak_log_filp);
-
-	leak_in_process = false;
 }
 
 
@@ -284,6 +324,8 @@ static void leak_process_alloc(void *p, size_t size)
 	wuy_list_append(&leak_memblock_list, &mb->list_node);
 	pthread_mutex_unlock(&leak_memblock_mutex);
 
+	leak_expire();
+
 	leak_in_process = false;
 }
 
@@ -333,6 +375,8 @@ static void leak_process_free(void *p)
 	cs->free_total += t;
 	pthread_mutex_unlock(&cs->mutex);
 
+	leak_expire();
+
 	leak_in_process = false;
 }
 
@@ -358,12 +402,16 @@ static void leak_process_update(void *p, size_t size)
 	mb->size = size;
 	pthread_mutex_unlock(&leak_memblock_mutex);
 
+	leak_expire();
+
 	leak_in_process = false;
 }
 
 void *malloc(size_t size)
 {
-	leak_routine();
+	if (leak_real_malloc == NULL) {
+		return tmp_malloc(size);
+	}
 
 	void *p = leak_real_malloc(size);
 
@@ -374,7 +422,9 @@ void *malloc(size_t size)
 
 void free(void *p)
 {
-	leak_routine();
+	if (tmp_free(p)) {
+		return;
+	}
 
 	leak_real_free(p);
 
@@ -383,7 +433,9 @@ void free(void *p)
 
 void *calloc(size_t nmemb, size_t size)
 {
-	leak_routine();
+	if (leak_real_calloc == NULL) {
+		return tmp_calloc(nmemb, size);
+	}
 
 	void *p = leak_real_calloc(nmemb, size);
 
@@ -394,7 +446,12 @@ void *calloc(size_t nmemb, size_t size)
 
 void *realloc(void *ptr, size_t size)
 {
-	leak_routine();
+	if (ptr == NULL) {
+		return malloc(size);
+	}
+	if (tmp_free(ptr)) {
+		return tmp_realloc(ptr, size);
+	}
 
 	void *newp = leak_real_realloc(ptr, size);
 
