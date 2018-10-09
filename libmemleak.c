@@ -25,6 +25,7 @@ static void *(*leak_real_malloc)(size_t size);
 static void (*leak_real_free)(void *ptr);
 static void *(*leak_real_calloc)(size_t nmemb, size_t size);
 static void *(*leak_real_realloc)(void *ptr, size_t size);
+static pid_t (*leak_real_fork)(void);
 
 static FILE *leak_log_filp;
 
@@ -37,8 +38,8 @@ struct leak_callstack {
 	size_t		alloc_size, free_size;
 	size_t		expired_size, free_expired_size;
 	time_t		free_min, free_max, free_total;
-	time_t		unfree_max;
 
+	wuy_list_t	expired_list;
 	wuy_dict_node_t	dict_node;
 
 	pthread_mutex_t	mutex;
@@ -72,7 +73,7 @@ static uint32_t leak_callstack_hash(const void *item)
 	const struct leak_callstack *cs = item;
 	uint32_t hash = cs->ip_num;
 	for (int i = 0; i < cs->ip_num; i++) {
-		hash ^= wuy_dict_hash_pointer(&cs->ips[i]);
+		hash ^= wuy_dict_hash_pointer((void *)cs->ips[i]);
 	}
 	return hash;
 }
@@ -82,6 +83,13 @@ static bool leak_callstack_equal(const void *a, const void *b)
 	const struct leak_callstack *csb = b;
 	return (csa->ip_num == csb->ip_num) &&
 		(memcmp(csa->ips, csb->ips, sizeof(unw_word_t) * csa->ip_num) == 0);
+}
+static int leak_callstack_cmp(const void *a, const void *b)
+{
+	const struct leak_callstack *csa = *(const struct leak_callstack **)a;
+	const struct leak_callstack *csb = *(const struct leak_callstack **)b;
+	return (csa->expired_count - csa->free_expired_count)
+		- (csb->expired_count - csb->free_expired_count);
 }
 
 static void leak_callstack_print(struct leak_callstack *cs)
@@ -163,6 +171,54 @@ static bool tmp_free(void *p)
 }
 
 
+static void leak_report(void)
+{
+	struct leak_callstack *callstacks[wuy_dict_count(leak_callstack_dict)];
+
+	int count = 0;
+	wuy_dict_node_t *node;
+	wuy_dict_iter(leak_callstack_dict, node) {
+		struct leak_callstack *cs = wuy_containerof(node,
+				struct leak_callstack, dict_node);
+		if (cs->expired_count == cs->free_expired_count) {
+			continue;
+		}
+		callstacks[count++] = cs;
+	}
+
+	qsort(callstacks, count, sizeof(struct leak_callstack *), leak_callstack_cmp);
+
+	time_t now = time(NULL);
+
+        fprintf(leak_log_filp, "\n== callstack statistics: (in ascending order)\n\n");
+	for (int i = 0; i < count; i++) {
+		struct leak_callstack *cs = callstacks[i];
+
+		time_t unfree_max = 0;
+		if (!wuy_list_empty(&cs->expired_list)) {
+			struct leak_memblock *mb = wuy_containerof(
+				wuy_list_first(&cs->expired_list),
+				struct leak_memblock, list_node);
+			unfree_max = now - mb->create;
+		}
+		fprintf(leak_log_filp, "callstack[%d]: may-leak=%d (%ld bytes)\n"
+                                "    expired=%d (%ld bytes), free_expired=%d (%ld bytes)\n"
+                                "    alloc=%d (%ld bytes), free=%d (%ld bytes)\n"
+                                "    freed memory live time: min=%ld max=%ld average=%ld\n"
+                                "    un-freed memory live time: max=%ld\n",
+                                cs->id,
+                                cs->expired_count - cs->free_expired_count,
+                                cs->expired_size - cs->free_expired_size,
+                                cs->expired_count, cs->expired_size,
+                                cs->free_expired_count, cs->free_expired_size,
+                                cs->alloc_count, cs->alloc_size,
+                                cs->free_count, cs->free_size,
+                                cs->free_min, cs->free_max,
+                                cs->free_count ? cs->free_total / cs->free_count : 0,
+                                unfree_max);
+	}
+}
+
 static void __attribute__((constructor))init(void)
 {
 	/* symbols */
@@ -177,6 +233,9 @@ static void __attribute__((constructor))init(void)
 
 	leak_real_free = dlsym(RTLD_NEXT, "free");
 	assert(leak_real_free != NULL);
+
+	leak_real_fork = dlsym(RTLD_NEXT, "fork");
+	assert(leak_real_fork != NULL);
 
 	/* dict */
 	leak_callstack_dict = wuy_dict_new_func(leak_callstack_hash,
@@ -207,6 +266,9 @@ static void __attribute__((constructor))init(void)
 	fprintf(leak_log_filp, "load symbols: %d\n", count);
 	fflush(leak_log_filp);
 
+	/* report at exit */
+	atexit(leak_report);
+
 	leak_inited = true;
 }
 
@@ -221,25 +283,29 @@ static void leak_expire(void)
 	wuy_list_node_t *node, *safe;
 	wuy_list_iter_safe(&leak_memblock_list, node, safe) {
 		struct leak_memblock *mb = wuy_containerof(node, struct leak_memblock, list_node);
-		if (now - mb->create < 10) { /* change this by your application scenario */
+		if (now - mb->create < 100) { /* change this by your application scenario */
 			break;
 		}
 
+		mb->expired = true;
+		wuy_list_delete(&mb->list_node);
+
 		struct leak_callstack *cs = mb->callstack;
+
+		pthread_mutex_lock(&cs->mutex);
 		cs->expired_count++;
 		cs->expired_size += mb->size;
+		wuy_list_append(&cs->expired_list, &mb->list_node);
+		pthread_mutex_unlock(&cs->mutex);
 
 		if (cs->expired_count == 1) {
 			fprintf(leak_log_filp, "callstack[%d] expires (size=%ld) first time:\n",
 					cs->id, mb->size);
 			leak_callstack_print(cs);
 		} else {
-			fprintf(leak_log_filp, "callstack[%d] expires (size=%ld;%ld) again: %d\n",
-					cs->id, mb->size, cs->expired_size, cs->expired_count);
+			fprintf(leak_log_filp, "callstack[%d] expires (size=%ld;%ld free=%d) again: %d\n",
+					cs->id, mb->size, cs->expired_size, cs->free_count, cs->expired_count);
 		}
-
-		mb->expired = true;
-		wuy_list_del_init(&mb->list_node);
 	}
 	pthread_mutex_unlock(&leak_memblock_mutex);
 
@@ -283,8 +349,8 @@ static struct leak_callstack *leak_current(void)
 	cs->id = leak_callstack_id++;
 	cs->ip_num = current->ip_num;
 	pthread_mutex_init(&cs->mutex, NULL);
-	cs->free_min = 1000;
 	memcpy(cs->ips, current->ips, sizeof(unw_word_t) * current->ip_num);
+	wuy_list_init(&cs->expired_list);
 	wuy_dict_add(leak_callstack_dict, cs);
 
 	pthread_mutex_unlock(&leak_callstack_mutex);
@@ -363,13 +429,19 @@ static void leak_process_free(void *p)
 	if (mb->expired) {
 		cs->free_expired_count++;
 		cs->free_expired_size += mb->size;
+
+		if (cs->free_expired_count <= 10) {
+			fprintf(leak_log_filp, "callstack[%d] free (size=%ld,time=%ld) after expired.%s\n",
+					cs->id, mb->size, time(NULL) - mb->create,
+					cs->free_expired_count == 10 ? " [DISABLED]" : "");
+		}
 	}
 
 	time_t t = time(NULL) - mb->create;
 	if (t > cs->free_max) {
 		cs->free_max = t;
 	}
-	if (t < cs->free_min) {
+	if (cs->free_min == 0 || t < cs->free_min) {
 		cs->free_min = t;
 	}
 	cs->free_total += t;
@@ -463,4 +535,18 @@ void *realloc(void *ptr, size_t size)
 	}
 
 	return newp;
+}
+
+pid_t fork(void)
+{
+	pid_t pid = leak_real_fork();
+	if (pid == 0) {
+		fclose(leak_log_filp);
+
+		char log_fname[100];
+		sprintf(log_fname, "/tmp/libmemleak.%d-%d", getppid(), getpid());
+		leak_log_filp = fopen(log_fname, "w");
+		assert(leak_log_filp != NULL);
+	}
+	return pid;
 }
