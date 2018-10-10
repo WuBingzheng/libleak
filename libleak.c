@@ -248,7 +248,6 @@ static void leak_report(void)
                                 cs->free_count ? cs->free_total / cs->free_count : 0,
                                 unfree_max);
 	}
-	fflush(leak_log_filp);
 }
 
 
@@ -410,6 +409,10 @@ static bool leak_enabled_check(void)
 	fclose(fp);
 
 	if (old ^ leak_enabled) {
+		if (!leak_enabled) {
+			leak_report();
+		}
+
 		fprintf(leak_log_filp, "# switch %s.\n", leak_enabled ? "enabled" : "disabled");
 		fflush(leak_log_filp);
 	}
