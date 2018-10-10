@@ -121,5 +121,5 @@ and `LEAK_PID_CHECK` said above.
 
 The log file is set by `LEAK_LOG_FILE` (default is `/tmp/libleak.$pid`).
 
-There is also a statistics report when target normal termination, either
-via exit(3) or via return from the main().
+There is also a statistics report when disabled or target normal termination,
+either via exit(3) or via return from the main().
