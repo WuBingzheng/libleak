@@ -20,12 +20,14 @@
 static bool leak_inited;
 
 static __thread bool leak_in_process;
+static __thread bool leak_in_unwind;
 
 static void *(*leak_real_malloc)(size_t size);
 static void (*leak_real_free)(void *ptr);
 static void *(*leak_real_calloc)(size_t nmemb, size_t size);
 static void *(*leak_real_realloc)(void *ptr, size_t size);
 static pid_t (*leak_real_fork)(void);
+static int (*leak_real_sigprocmask)(int how, const sigset_t *set, sigset_t *oldset);
 
 static FILE *leak_log_filp;
 
@@ -173,6 +175,8 @@ static bool tmp_free(void *p)
 
 static void leak_report(void)
 {
+	fprintf(leak_log_filp, "\n== callstack statistics: (in ascending order)\n\n");
+
 	struct leak_callstack *callstacks[wuy_dict_count(leak_callstack_dict)];
 
 	int count = 0;
@@ -190,7 +194,6 @@ static void leak_report(void)
 
 	time_t now = time(NULL);
 
-        fprintf(leak_log_filp, "\n== callstack statistics: (in ascending order)\n\n");
 	for (int i = 0; i < count; i++) {
 		struct leak_callstack *cs = callstacks[i];
 
@@ -217,6 +220,7 @@ static void leak_report(void)
                                 cs->free_count ? cs->free_total / cs->free_count : 0,
                                 unfree_max);
 	}
+	fflush(leak_log_filp);
 }
 
 static void __attribute__((constructor))init(void)
@@ -236,6 +240,9 @@ static void __attribute__((constructor))init(void)
 
 	leak_real_fork = dlsym(RTLD_NEXT, "fork");
 	assert(leak_real_fork != NULL);
+
+	leak_real_sigprocmask = dlsym(RTLD_NEXT, "sigprocmask");
+	assert(leak_real_sigprocmask != NULL);
 
 	/* dict */
 	leak_callstack_dict = wuy_dict_new_func(leak_callstack_hash,
@@ -283,7 +290,7 @@ static void leak_expire(void)
 	wuy_list_node_t *node, *safe;
 	wuy_list_iter_safe(&leak_memblock_list, node, safe) {
 		struct leak_memblock *mb = wuy_containerof(node, struct leak_memblock, list_node);
-		if (now - mb->create < 100) { /* change this by your application scenario */
+		if (now - mb->create < 300) { /* change this by your application scenario */
 			break;
 		}
 
@@ -298,18 +305,56 @@ static void leak_expire(void)
 		wuy_list_append(&cs->expired_list, &mb->list_node);
 		pthread_mutex_unlock(&cs->mutex);
 
-		if (cs->expired_count == 1) {
-			fprintf(leak_log_filp, "callstack[%d] expires (size=%ld) first time:\n",
-					cs->id, mb->size);
+		fprintf(leak_log_filp, "callstack[%d] expires. count=%d size=%ld/%ld alloc=%d free=%d\n",
+				cs->id, cs->expired_count, mb->size, cs->expired_size,
+				cs->alloc_count, cs->free_count);
+
+		if ((cs->expired_count % 100) == 1) {
 			leak_callstack_print(cs);
-		} else {
-			fprintf(leak_log_filp, "callstack[%d] expires (size=%ld;%ld free=%d) again: %d\n",
-					cs->id, mb->size, cs->expired_size, cs->free_count, cs->expired_count);
 		}
 	}
 	pthread_mutex_unlock(&leak_memblock_mutex);
 
 	fflush(leak_log_filp);
+}
+
+
+static bool leak_enabled_check(void)
+{
+	static bool leak_enabled = false;
+
+	static time_t last_check;
+
+	time_t now = time(NULL);
+	if (now - last_check < 10) {
+		return leak_enabled;
+	}
+
+	last_check = now;
+
+	FILE *fp = fopen("/tmp/libmemleak.enabled", "r");
+	if (fp == NULL) {
+		return leak_enabled;
+	}
+
+	bool old = leak_enabled;
+	leak_enabled = false;
+
+	pid_t pid_enabled, pid_self = getpid();
+	while (fscanf(fp, "%d", &pid_enabled) == 1) {
+		if (pid_enabled == pid_self) {
+			leak_enabled = true;
+			break;
+		}
+	}
+	fclose(fp);
+
+	if (old ^ leak_enabled) {
+		fprintf(leak_log_filp, "# switch %s.\n", leak_enabled ? "enabled" : "disabled");
+		fflush(leak_log_filp);
+	}
+
+	return leak_enabled;
 }
 
 
@@ -320,9 +365,15 @@ static int leak_unwind(unw_word_t *ips, int size)
 	unw_getcontext(&context);
 	unw_cursor_t cursor;
 	unw_init_local(&cursor, &context);
+
+	leak_in_unwind = true;
+
 	do {
 		unw_get_reg(&cursor, UNW_REG_IP, &ips[i++]);
 	} while (i < size && unw_step(&cursor) > 0);
+
+	leak_in_unwind = false;
+
 	return i;
 }
 
@@ -367,6 +418,11 @@ static void leak_process_alloc(void *p, size_t size)
 	}
 	leak_in_process = true;
 
+	if (!leak_enabled_check()) {
+		leak_in_process = false;
+		return;
+	}
+
 	struct leak_callstack *cs = leak_current();
 	if (cs == NULL) {
 		leak_in_process = false;
@@ -405,6 +461,11 @@ static void leak_process_free(void *p)
 	}
 	leak_in_process = true;
 
+	if (!leak_enabled_check()) {
+		leak_in_process = false;
+		return;
+	}
+
 	pthread_mutex_lock(&leak_memblock_mutex);
 	struct leak_memblock key = { .address = p };
 	struct leak_memblock *mb = wuy_dict_get(leak_memblock_dict, &key);
@@ -430,11 +491,8 @@ static void leak_process_free(void *p)
 		cs->free_expired_count++;
 		cs->free_expired_size += mb->size;
 
-		if (cs->free_expired_count <= 10) {
-			fprintf(leak_log_filp, "callstack[%d] free (size=%ld,time=%ld) after expired.%s\n",
-					cs->id, mb->size, time(NULL) - mb->create,
-					cs->free_expired_count == 10 ? " [DISABLED]" : "");
-		}
+		fprintf(leak_log_filp, "callstack[%d] free (size=%ld,time=%ld) after expired.\n",
+				cs->id, mb->size, time(NULL) - mb->create);
 	}
 
 	time_t t = time(NULL) - mb->create;
@@ -461,6 +519,11 @@ static void leak_process_update(void *p, size_t size)
 		return;
 	}
 	leak_in_process = true;
+
+	if (!leak_enabled_check()) {
+		leak_in_process = false;
+		return;
+	}
 
 	pthread_mutex_lock(&leak_memblock_mutex);
 	struct leak_memblock key = { .address = p };
@@ -549,4 +612,12 @@ pid_t fork(void)
 		assert(leak_log_filp != NULL);
 	}
 	return pid;
+}
+
+int sigprocmask(int how, const sigset_t *set, sigset_t *oldset)
+{
+	if (leak_in_unwind) {
+		return 0;
+	}
+	return leak_real_sigprocmask(how, set, oldset);
 }
