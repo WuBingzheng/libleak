@@ -12,6 +12,8 @@ In fact `libleak` can not identify memory leak, while it just takes the
 memory as leak if it lives longer than a threshold. The threshold is 60
 second by default, but you should set it according to your scenarios.
 
+Compared with other similar libraries (e.g. mtrace), `libleak` is easier
+to use, and prints the full call-stack at suspicious memory leak point.
 
 # licence
 
@@ -47,7 +49,7 @@ Then go:
 
 ### basic
 
-0. `libelf` and `libunwind` are need by `libleak`. They can be installed in Debian/Ubuntu by:
+1. `libelf` and `libunwind` are need by `libleak`. They can be installed in Debian/Ubuntu by:
 
         $ sudo apt install libelf libunwind
 
@@ -55,13 +57,13 @@ Then go:
 
         $ sudo yum install elfutils-libelf libunwind
 
-1. [Download](https://github.com/WuBingzheng/libleak/releases) or build the shared-object `libleak.so`.
+2. [Download](https://github.com/WuBingzheng/libleak/releases) or build the shared-object `libleak.so`.
 
-2. Run the target program:
+3. Run the target program:
 
         $ LD_PRELOAD=/path/of/libleak.so ./a.out
 
-3. Then you will read output in `/tmp/libleak.$pid` in time.
+4. Then you will read output in `/tmp/libleak.$pid` in time.
 
 ### set expire threshold
 
