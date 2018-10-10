@@ -10,27 +10,52 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+/* libwuya */
 #include "wuy_dict.h"
 #include "wuy_list.h"
 #include "wuy_pool.h"
 
 #include "symtab.h"
 
+/* ### configuration from environment variables */
 
-static bool leak_inited;
+/* LEAK_EXPIRE: log if a memory block is not freed after this time.
+ * You should change this according to your scenarios. */
+static time_t conf_expire = 60;
 
-static __thread bool leak_in_process;
-static __thread bool leak_in_unwind;
+/* LEAK_AUTO_EXPIRE: increase 'expire' if any block is freed
+ * after expired, if set. */
+static bool conf_auto_expire = false;
 
+/* LEAK_PID_CHECK: interval to check conf_pid_file to enable
+ * monitoring. Only useful for multi-process program.
+ * 0 means no checking and monitor all processes. */
+static time_t conf_pid_check = 0;
+
+/* LEAK_PID_FILE: each line contains a pid to monitor. */
+static char *conf_pid_file = "/tmp/libleak.enabled";
+
+/* LEAK_LOG_FILE: log file name. */
+static char *conf_log_file = "/tmp/libleak";
+
+
+/* ### hooking symbols */
 static void *(*leak_real_malloc)(size_t size);
 static void (*leak_real_free)(void *ptr);
 static void *(*leak_real_calloc)(size_t nmemb, size_t size);
 static void *(*leak_real_realloc)(void *ptr, size_t size);
-static pid_t (*leak_real_fork)(void);
-static int (*leak_real_sigprocmask)(int how, const sigset_t *set, sigset_t *oldset);
+static pid_t (*leak_real_fork)(void); /* open new log file for new process */
+static int (*leak_real_sigprocmask)(int how, const sigset_t *set, sigset_t *oldset); /* to optimize libunwind */
 
+
+/* ### running flags */
+static bool leak_inited;
+static __thread bool leak_in_process;
+static __thread bool leak_in_unwind;
 static FILE *leak_log_filp;
 
+
+/* ### structures and utils for call-stack and memory-block */
 
 struct leak_callstack {
 	int		id;
@@ -105,11 +130,11 @@ static void leak_callstack_print(struct leak_callstack *cs)
 		}
 
 		int offset;
-		const char *path;
-		const char *name = symtab_get(address, &offset, &path);
+		const char *object;
+		const char *name = symtab_get(address, &offset, &object);
 
 		if (name == NULL) {
-			fprintf(leak_log_filp, "    0x%016zx  %s\n", address, path);
+			fprintf(leak_log_filp, "    0x%016zx  %s\n", address, object);
 		} else {
 			if (begin) {
 				if (memcmp(name, "leak_", 5) == 0) {
@@ -120,7 +145,7 @@ static void leak_callstack_print(struct leak_callstack *cs)
 			}
 
 			fprintf(leak_log_filp, "    0x%016zx  %s  %s()+%d\n",
-					address, path, name, offset);
+					address, object, name, offset);
 
 			if (strcmp(name, "main") == 0) {
 				break;
@@ -143,7 +168,9 @@ static bool leak_memblock_equal(const void *a, const void *b)
 }
 
 
-static uint8_t tmp_buffer[1024000]; /* increase this if need */
+/* ### a simple memory allocation used before init() */
+
+static uint8_t tmp_buffer[1024 * 1024]; /* increase this if need */
 static uint8_t *tmp_buf_pos = tmp_buffer;
 static void *tmp_malloc(size_t size)
 {
@@ -173,9 +200,10 @@ static bool tmp_free(void *p)
 }
 
 
+/* ### report statistics on exiting */
 static void leak_report(void)
 {
-	fprintf(leak_log_filp, "\n== callstack statistics: (in ascending order)\n\n");
+	fprintf(leak_log_filp, "\n# callstack statistics: (in ascending order)\n\n");
 
 	struct leak_callstack *callstacks[wuy_dict_count(leak_callstack_dict)];
 
@@ -223,9 +251,33 @@ static void leak_report(void)
 	fflush(leak_log_filp);
 }
 
+
+/* ### module init */
 static void __attribute__((constructor))init(void)
 {
-	/* symbols */
+	/* read configs from environment variables */
+	char *ev = getenv("LEAK_EXPIRE");
+	if (ev != NULL) {
+		conf_expire = atoi(ev);
+	}
+	ev = getenv("LEAK_AUTO_EXPIRE");
+	if (ev != NULL) {
+		conf_auto_expire = true;
+	}
+	ev = getenv("LEAK_LOG_FILE");
+	if (ev != NULL) {
+		conf_log_file = strdup(ev);
+	}
+	ev = getenv("LEAK_PID_CHECK");
+	if (ev != NULL) {
+		conf_pid_check = atoi(ev);
+	}
+	ev = getenv("LEAK_PID_FILE");
+	if (ev != NULL) {
+		conf_pid_file = strdup(ev);
+	}
+
+	/* hook symbols */
 	leak_real_malloc = dlsym(RTLD_NEXT, "malloc");
 	assert(leak_real_malloc != NULL);
 
@@ -244,7 +296,7 @@ static void __attribute__((constructor))init(void)
 	leak_real_sigprocmask = dlsym(RTLD_NEXT, "sigprocmask");
 	assert(leak_real_sigprocmask != NULL);
 
-	/* dict */
+	/* init dict and memory pool */
 	leak_callstack_dict = wuy_dict_new_func(leak_callstack_hash,
 			leak_callstack_equal,
 			offsetof(struct leak_callstack, dict_node));
@@ -256,29 +308,30 @@ static void __attribute__((constructor))init(void)
 	leak_memblock_pool = wuy_pool_new_type(struct leak_memblock);
 
 	/* log file */
-	pid_t pid = getpid();
 	char log_fname[100];
-	sprintf(log_fname, "/tmp/libmemleak.%d", pid);
+	sprintf(log_fname, "%s.%d", conf_log_file, getpid());
 	leak_log_filp = fopen(log_fname, "w");
 	assert(leak_log_filp != NULL);
 
 	/* debug info */
-	int count = symtab_build(pid);
+	int count = symtab_build();
 	if (count == 0) {
 		fprintf(stderr, "exit for no debug symbol found.\n");
 		fprintf(leak_log_filp, "exit for no debug symbol found.\n");
 		exit(123);
 	}
 
-	fprintf(leak_log_filp, "load symbols: %d\n", count);
-	fflush(leak_log_filp);
-
 	/* report at exit */
 	atexit(leak_report);
+
+	fprintf(leak_log_filp, "# start monitor. expire=%lds\n", conf_expire);
+	fflush(leak_log_filp);
 
 	leak_inited = true;
 }
 
+
+/* ### check, expire and log memory blocks */
 static void leak_expire(void)
 {
 	time_t now = time(NULL);
@@ -290,7 +343,7 @@ static void leak_expire(void)
 	wuy_list_node_t *node, *safe;
 	wuy_list_iter_safe(&leak_memblock_list, node, safe) {
 		struct leak_memblock *mb = wuy_containerof(node, struct leak_memblock, list_node);
-		if (now - mb->create < 300) { /* change this by your application scenario */
+		if (now - mb->create < conf_expire) {
 			break;
 		}
 
@@ -310,6 +363,7 @@ static void leak_expire(void)
 				cs->alloc_count, cs->free_count);
 
 		if ((cs->expired_count % 100) == 1) {
+			/* print callstack once every 100 expiration */
 			leak_callstack_print(cs);
 		}
 	}
@@ -319,31 +373,37 @@ static void leak_expire(void)
 }
 
 
+/* ### check LEAK_PID_FILE to enable/disable monitoring current process */
 static bool leak_enabled_check(void)
 {
+	/* enable all processes if LEAK_PID_CHECK is not set */
+	if (conf_pid_check == 0) {
+		return true;
+	}
+
 	static bool leak_enabled = false;
 
 	static time_t last_check;
 
 	time_t now = time(NULL);
-	if (now - last_check < 10) {
+	if (now - last_check < conf_pid_check) {
 		return leak_enabled;
 	}
 
 	last_check = now;
 
-	FILE *fp = fopen("/tmp/libmemleak.enabled", "r");
+	FILE *fp = fopen(conf_pid_file, "r");
 	if (fp == NULL) {
 		return leak_enabled;
 	}
 
 	bool old = leak_enabled;
-	leak_enabled = false;
+	leak_enabled = false; /* disable if the pid is not found in file later */
 
 	pid_t pid_enabled, pid_self = getpid();
 	while (fscanf(fp, "%d", &pid_enabled) == 1) {
 		if (pid_enabled == pid_self) {
-			leak_enabled = true;
+			leak_enabled = true; /* enable! */
 			break;
 		}
 	}
@@ -358,6 +418,7 @@ static bool leak_enabled_check(void)
 }
 
 
+/* ### unwind. */
 static int leak_unwind(unw_word_t *ips, int size)
 {
 	int i = 0;
@@ -366,6 +427,9 @@ static int leak_unwind(unw_word_t *ips, int size)
 	unw_cursor_t cursor;
 	unw_init_local(&cursor, &context);
 
+	/* libunwind calls sigprocmask() during unw_step, which is expensive
+	 * and not necessary. So we hook and disable sigprocmask() during
+	 * unwinding. */
 	leak_in_unwind = true;
 
 	do {
@@ -491,8 +555,19 @@ static void leak_process_free(void *p)
 		cs->free_expired_count++;
 		cs->free_expired_size += mb->size;
 
-		fprintf(leak_log_filp, "callstack[%d] free (size=%ld,time=%ld) after expired.\n",
-				cs->id, mb->size, time(NULL) - mb->create);
+		time_t live = time(NULL) - mb->create;
+		fprintf(leak_log_filp, "callstack[%d] frees after expired."
+				" live=%ld expired=%d free_expired=%d\n",
+				cs->id, live, cs->expired_count, cs->free_expired_count);
+
+		if (conf_auto_expire && live > conf_expire) {
+			fprintf(leak_log_filp, "# increase expire from %ld to %ld.\n",
+					conf_expire, live);
+
+			conf_expire = live;
+		}
+
+		fflush(leak_log_filp);
 	}
 
 	time_t t = time(NULL) - mb->create;
@@ -607,9 +682,13 @@ pid_t fork(void)
 		fclose(leak_log_filp);
 
 		char log_fname[100];
-		sprintf(log_fname, "/tmp/libmemleak.%d-%d", getppid(), getpid());
+		sprintf(log_fname, "%s.%d", conf_log_file, getpid());
 		leak_log_filp = fopen(log_fname, "w");
 		assert(leak_log_filp != NULL);
+
+		fprintf(leak_log_filp, "# start monitor. parent=%d expire=%lds\n",
+				getppid(), conf_expire);
+		fflush(leak_log_filp);
 	}
 	return pid;
 }

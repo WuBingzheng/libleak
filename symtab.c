@@ -15,18 +15,20 @@
 #include <string.h>
 #include <stdbool.h>
 
-struct symbol_s {
+struct symbol {
 	uintptr_t	address;
 	size_t		size;
 	const char	*name;
-	const char	*path;
 };
 
-static struct symbol_s symbol_table[100000]; /* increase this if need */
+static struct symbol symbol_table[100000]; /* increase this if need */
 static int symbol_count;
 
+static struct symbol object_table[1000]; /* increase this if need */
+static int object_count;
+
 static int symtab_build_section(Elf *elf, Elf_Scn *section,
-		uintptr_t offset, uintptr_t base_addr, const char *path)
+		uintptr_t offset, uintptr_t base_addr)
 {
 	GElf_Shdr shdr;
 	if (gelf_getshdr(section, &shdr) == NULL) {
@@ -54,13 +56,11 @@ static int symtab_build_section(Elf *elf, Elf_Scn *section,
 			continue;
 		}
 
-		if (symbol_count >= sizeof(symbol_table) / sizeof(struct symbol_s)) {
+		if (symbol_count >= sizeof(symbol_table) / sizeof(struct symbol)) {
 			abort();
 		}
 
-		struct symbol_s *sym = &symbol_table[symbol_count++];
-
-		sym->path = path;
+		struct symbol *sym = &symbol_table[symbol_count++];
 		sym->name = strdup(elf_strptr(elf, shdr.sh_link, (size_t)esym.st_name));
 		sym->address = esym.st_value - base_addr + offset;
 		sym->size = esym.st_size;
@@ -116,7 +116,7 @@ static int symtab_build_file(const char *path, uintptr_t start, uintptr_t end)
 	Elf_Scn* section = NULL;
 	int count = 0;
 	while ((section = elf_nextscn(elf, section)) != NULL) {
-		count += symtab_build_section(elf, section, offset, base_addr, path);
+		count += symtab_build_section(elf, section, offset, base_addr);
 	}
 
 	/* clean up */
@@ -127,8 +127,8 @@ static int symtab_build_file(const char *path, uintptr_t start, uintptr_t end)
 
 static int symbol_cmp(const void *a, const void *b)
 {
-	const struct symbol_s *sa = a;
-	const struct symbol_s *sb = b;
+	const struct symbol *sa = a;
+	const struct symbol *sb = b;
 	return sa->address < sb->address ? -1 : 1;
 }
 
@@ -178,49 +178,56 @@ static const char *proc_maps(pid_t pid, size_t *start, size_t *end, int *exe_sel
 	return NULL;
 }
 
-int symtab_build(pid_t pid)
+int symtab_build(void)
 {
 	const char *path;
 	size_t start, end;
 	int exe_self;
+	pid_t pid = getpid();
 	while ((path = proc_maps(pid, &start, &end, &exe_self)) != NULL) {
 
-		path = strdup(path);
-
 		int count = symtab_build_file(path, start, end);
-
-		if (count == 0) {
-			if (exe_self) {
-				return 0;
-			}
-			struct symbol_s *sym = &symbol_table[symbol_count++];
-			sym->name = NULL;
-			sym->path = path;
-			sym->address = start;
-			sym->size = end - start;
+		if (count == 0 && exe_self) {
+			return 0;
 		}
+
+		/* build object table */
+		struct symbol *obj = &object_table[object_count++];
+		obj->name = strdup(strrchr(path, '/') + 1);
+		obj->address = start;
+		obj->size = end - start;
 	}
 
 	/* finish */
-	qsort(symbol_table, symbol_count, sizeof(struct symbol_s), symbol_cmp);
+	qsort(symbol_table, symbol_count, sizeof(struct symbol), symbol_cmp);
 	return symbol_count;
 }
 
-const char *symtab_get(uintptr_t address, int *offset, const char **path)
+static struct symbol *symbol_search(struct symbol *table, int count, uintptr_t address)
 {
-	int min = 0, max = symbol_count - 1;
+	int min = 0, max = count - 1;
 	while (min <= max) {
 		int mid = (min + max) / 2;
-		struct symbol_s *sym = &symbol_table[mid];
+		struct symbol *sym = &table[mid];
 		if (address < sym->address) {
 			max = mid - 1;
 		} else if (address >= sym->address + sym->size) {
 			min = mid + 1;
 		} else {
-			*offset = address - sym->address;
-			*path = sym->path;
-			return sym->name;
+			return sym;
 		}
 	}
 	return NULL;
+}
+const char *symtab_get(uintptr_t address, int *offset, const char **object_name)
+{
+	struct symbol *obj = symbol_search(object_table, object_count, address);
+	struct symbol *sym = symbol_search(symbol_table, symbol_count, address);
+	if (obj == NULL || sym == NULL) {
+		return NULL;
+	}
+
+	*object_name = obj->name;
+	*offset = address - sym->address;
+	return sym->name;
 }

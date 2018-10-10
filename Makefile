@@ -1,5 +1,9 @@
-CFLAGS = -g -O2 -Wall -fPIC -I../futures_engine/libwuya
-LDFLAGS = -L../futures_engine/libwuya
+CFLAGS = -g -O2 -Wall -fPIC -Ilibwuya
+LDFLAGS = -Llibwuya
 
-libmemleak.so: libmemleak.o symtab.o
+libleak.so: libleak.o symtab.o
+	CFLAGS='-fPIC' make -C libwuya
 	gcc -shared -o $@ $^ $(LDFLAGS) -lwuya -lpthread -ldl -lelf -lunwind -lunwind-x86_64
+
+clean:
+	rm -f libleak.so *.o

@@ -1,0 +1,3 @@
+[submodule "libwuya"]
+	path = libwuya
+	url = https://github.com/WuBingzheng/libwuya.git
