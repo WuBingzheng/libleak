@@ -28,11 +28,11 @@ static time_t conf_expire = 60;
 static bool conf_auto_expire = false;
 
 /* LEAK_PID_CHECK: interval to check conf_pid_file to enable
- * monitoring. Only useful for multi-process program.
- * 0 means no checking and monitor all processes. */
+ * detectiong. Only useful for multi-process program.
+ * 0 means no checking and detect all processes. */
 static time_t conf_pid_check = 0;
 
-/* LEAK_PID_FILE: each line contains a pid to monitor. */
+/* LEAK_PID_FILE: each line contains a pid to detect. */
 static char *conf_pid_file = "/tmp/libleak.enabled";
 
 /* LEAK_LOG_FILE: log file name. */
@@ -324,7 +324,7 @@ static void __attribute__((constructor))init(void)
 	/* report at exit */
 	atexit(leak_report);
 
-	fprintf(leak_log_filp, "# start monitor. expire=%lds\n", conf_expire);
+	fprintf(leak_log_filp, "# start detect. expire=%lds\n", conf_expire);
 	fflush(leak_log_filp);
 
 	leak_inited = true;
@@ -373,7 +373,7 @@ static void leak_expire(void)
 }
 
 
-/* ### check LEAK_PID_FILE to enable/disable monitoring current process */
+/* ### check LEAK_PID_FILE to enable/disable detectiong current process */
 static bool leak_enabled_check(void)
 {
 	/* enable all processes if LEAK_PID_CHECK is not set */
@@ -686,7 +686,7 @@ pid_t fork(void)
 		leak_log_filp = fopen(log_fname, "w");
 		assert(leak_log_filp != NULL);
 
-		fprintf(leak_log_filp, "# start monitor. parent=%d expire=%lds\n",
+		fprintf(leak_log_filp, "# start detect. parent=%d expire=%lds\n",
 				getppid(), conf_expire);
 		fflush(leak_log_filp);
 	}
