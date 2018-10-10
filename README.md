@@ -6,14 +6,14 @@ by LD_PRELOAD.
 There is no need to modify or re-compile the target program, and you can
 enable/disable the detection during target running.
 
-There is little impact on performance.
-
 In fact `libleak` can not identify memory leak, while it just takes the
 memory as leak if it lives longer than a threshold. The threshold is 60
 second by default, but you should set it according to your scenarios.
 
-Compared with other similar libraries (e.g. mtrace), `libleak` is easier
-to use, and prints the full call-stack at suspicious memory leak point.
+There is less impact on performance, compared with `valgrind` and `memleax`.
+
+It prints the full call-stack at suspicious memory leak point, and easier
+to use, compared with other similar libraries (e.g. `mtrace`).
 
 # licence
 
