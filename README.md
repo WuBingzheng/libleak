@@ -6,7 +6,7 @@ by LD_PRELOAD.
 There is no need to modify or re-compile the target program, and you can
 enable/disable the detection during target running.
 
-There is very little impact on performance.
+There is little impact on performance.
 
 In fact `libleak` can not identify memory leak, while it just takes the
 memory as leak if it lives longer than a threshold. The threshold is 60
@@ -98,6 +98,14 @@ setting `LEAK_PID_CHECK` and `LEAK_PID_FILE`:
 one pid each line, no empty line, no comment line.
 You can add or delete pids to/from this file during running.
 
+To enable detecting process pid=1234:
+
+    $ echo 1234 >> /tmp/libleak.enabled
+
+To disable detecting process pid=1234:
+
+    $ sed -i '/1234/d' /tmp/libleak.enabled
+
 ### for multi-thread program
 
 `libleak` is multi-thread safe.
@@ -112,3 +120,6 @@ and `LEAK_PID_CHECK` said above.
 ### set the log
 
 The log file is set by `LEAK_LOG_FILE` (default is `/tmp/libleak.$pid`).
+
+There is also a statistics report when target normal termination, either
+via exit(3) or via return from the main().
