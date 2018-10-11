@@ -1,12 +1,12 @@
 #define _GNU_SOURCE
 
+#include <execinfo.h>
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <dlfcn.h>
 #include <pthread.h>
 #include <string.h>
-#include <libunwind.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -15,7 +15,6 @@
 #include "wuy_list.h"
 #include "wuy_pool.h"
 
-#include "symtab.h"
 
 /* ### configuration from environment variables */
 
@@ -45,13 +44,11 @@ static void (*leak_real_free)(void *ptr);
 static void *(*leak_real_calloc)(size_t nmemb, size_t size);
 static void *(*leak_real_realloc)(void *ptr, size_t size);
 static pid_t (*leak_real_fork)(void); /* open new log file for new process */
-static int (*leak_real_sigprocmask)(int how, const sigset_t *set, sigset_t *oldset); /* to optimize libunwind */
 
 
 /* ### running flags */
 static bool leak_inited;
 static __thread bool leak_in_process;
-static __thread bool leak_in_unwind;
 static FILE *leak_log_filp;
 
 
@@ -72,7 +69,7 @@ struct leak_callstack {
 	pthread_mutex_t	mutex;
 
 	int		ip_num;
-	unw_word_t	ips[0];
+	void		*ips[0];
 };
 static wuy_dict_t *leak_callstack_dict;
 static pthread_mutex_t leak_callstack_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -109,7 +106,7 @@ static bool leak_callstack_equal(const void *a, const void *b)
 	const struct leak_callstack *csa = a;
 	const struct leak_callstack *csb = b;
 	return (csa->ip_num == csb->ip_num) &&
-		(memcmp(csa->ips, csb->ips, sizeof(unw_word_t) * csa->ip_num) == 0);
+		(memcmp(csa->ips, csb->ips, sizeof(void *) * csa->ip_num) == 0);
 }
 static int leak_callstack_cmp(const void *a, const void *b)
 {
@@ -121,36 +118,10 @@ static int leak_callstack_cmp(const void *a, const void *b)
 
 static void leak_callstack_print(struct leak_callstack *cs)
 {
-	bool begin = true;
+	char **symbols = backtrace_symbols(cs->ips, cs->ip_num);
 
-	for (int i = 0; i < cs->ip_num; i++) {
-		uintptr_t address = cs->ips[i];
-		if (address == 0) {
-			break;
-		}
-
-		int offset;
-		const char *object;
-		const char *name = symtab_get(address, &offset, &object);
-
-		if (name == NULL) {
-			fprintf(leak_log_filp, "    0x%016zx  %s\n", address, object);
-		} else {
-			if (begin) {
-				if (memcmp(name, "leak_", 5) == 0) {
-					continue;
-				} else {
-					begin = false;
-				}
-			}
-
-			fprintf(leak_log_filp, "    0x%016zx  %s  %s()+%d\n",
-					address, object, name, offset);
-
-			if (strcmp(name, "main") == 0) {
-				break;
-			}
-		}
+	for (int i = 2; i < cs->ip_num; i++) {
+		fprintf(leak_log_filp, "    %s\n", symbols[i]);
 	}
 }
 
@@ -292,9 +263,6 @@ static void __attribute__((constructor))init(void)
 	leak_real_fork = dlsym(RTLD_NEXT, "fork");
 	assert(leak_real_fork != NULL);
 
-	leak_real_sigprocmask = dlsym(RTLD_NEXT, "sigprocmask");
-	assert(leak_real_sigprocmask != NULL);
-
 	/* init dict and memory pool */
 	leak_callstack_dict = wuy_dict_new_func(leak_callstack_hash,
 			leak_callstack_equal,
@@ -311,14 +279,6 @@ static void __attribute__((constructor))init(void)
 	sprintf(log_fname, "%s.%d", conf_log_file, getpid());
 	leak_log_filp = fopen(log_fname, "w");
 	assert(leak_log_filp != NULL);
-
-	/* debug info */
-	int count = symtab_build();
-	if (count == 0) {
-		fprintf(stderr, "exit for no debug symbol found.\n");
-		fprintf(leak_log_filp, "exit for no debug symbol found.\n");
-		exit(123);
-	}
 
 	/* report at exit */
 	atexit(leak_report);
@@ -421,35 +381,12 @@ static bool leak_enabled_check(void)
 }
 
 
-/* ### unwind. */
-static int leak_unwind(unw_word_t *ips, int size)
-{
-	int i = 0;
-	unw_context_t context;
-	unw_getcontext(&context);
-	unw_cursor_t cursor;
-	unw_init_local(&cursor, &context);
-
-	/* libunwind calls sigprocmask() during unw_step, which is expensive
-	 * and not necessary. So we hook and disable sigprocmask() during
-	 * unwinding. */
-	leak_in_unwind = true;
-
-	do {
-		unw_get_reg(&cursor, UNW_REG_IP, &ips[i++]);
-	} while (i < size && unw_step(&cursor) > 0);
-
-	leak_in_unwind = false;
-
-	return i;
-}
-
 static struct leak_callstack *leak_current(void)
 {
 	static int leak_callstack_id = 1;
 
 	struct leak_callstack current[20];
-	current->ip_num = leak_unwind(current->ips, 100);
+	current->ip_num = backtrace(current->ips, 100);
 
 	if (current->ip_num == 0) {
 		return NULL;
@@ -463,11 +400,11 @@ static struct leak_callstack *leak_current(void)
 		return cs;
 	}
 
-	cs = leak_real_calloc(1, sizeof(struct leak_callstack) + sizeof(unw_word_t) * current->ip_num);
+	cs = leak_real_calloc(1, sizeof(struct leak_callstack) + sizeof(void *) * current->ip_num);
 	cs->id = leak_callstack_id++;
 	cs->ip_num = current->ip_num;
 	pthread_mutex_init(&cs->mutex, NULL);
-	memcpy(cs->ips, current->ips, sizeof(unw_word_t) * current->ip_num);
+	memcpy(cs->ips, current->ips, sizeof(void *) * current->ip_num);
 	wuy_list_init(&cs->expired_list);
 	wuy_dict_add(leak_callstack_dict, cs);
 
@@ -694,12 +631,4 @@ pid_t fork(void)
 		fflush(leak_log_filp);
 	}
 	return pid;
-}
-
-int sigprocmask(int how, const sigset_t *set, sigset_t *oldset)
-{
-	if (leak_in_unwind) {
-		return 0;
-	}
-	return leak_real_sigprocmask(how, set, oldset);
 }

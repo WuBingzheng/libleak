@@ -15,55 +15,35 @@ There is less impact on performance, compared with `valgrind` and `memleax`.
 It prints the full call-stack at suspicious memory leak point, and easier
 to use, compared with other similar libraries (e.g. `mtrace`).
 
-# licence
+# LICENCE
 
 GPLv2
 
-# OS-machine
+# OS-MACHINE
 
 - GNU/Linux only by now. But FreeBSD should be OK with some code changing
 
 - x86_64 is only tested by now. But others should be OK.
 
 
-# build from source
-
-The development package of `libelf` and `libunwind` is need before building.
-
-They can be installed in Debian/Ubuntu by:
-
-    $ sudo apt install libelf-dev libunwind-dev
-
-or in CentOS by:
-
-    $ sudo yum install elfutils-libelf-devel libunwind-devel
-
-Then go:
+# BUILD FROM SOURCE
 
     $ git clone --recursive https://github.com/WuBingzheng/libleak.git
     $ cd libleak
     $ make
 
 
-# usage
+# USAGE
 
 ### basic
 
-1. `libelf` and `libunwind` are need by `libleak`. They can be installed in Debian/Ubuntu by:
+1. [Download](https://github.com/WuBingzheng/libleak/releases) or build the shared-object `libleak.so`.
 
-        $ sudo apt install libelf libunwind
-
-   or in CentOS by:
-
-        $ sudo yum install elfutils-libelf libunwind
-
-2. [Download](https://github.com/WuBingzheng/libleak/releases) or build the shared-object `libleak.so`.
-
-3. Run the target program:
+2. Run the target program:
 
         $ LD_PRELOAD=/path/of/libleak.so ./a.out
 
-4. Then you will read output in `/tmp/libleak.$pid` in time.
+3. Then you will read output in `/tmp/libleak.$pid` in time.
 
 ### set expire threshold
 
