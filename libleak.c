@@ -123,6 +123,8 @@ static void leak_callstack_print(struct leak_callstack *cs)
 	for (int i = 2; i < cs->ip_num; i++) {
 		fprintf(leak_log_filp, "    %s\n", symbols[i]);
 	}
+
+	free(symbols);
 }
 
 
