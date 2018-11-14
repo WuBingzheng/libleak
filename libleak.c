@@ -94,9 +94,10 @@ static pthread_mutex_t leak_memblock_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static uint32_t leak_callstack_hash(const void *item)
 {
+	int i = 0;
 	const struct leak_callstack *cs = item;
 	uint32_t hash = cs->ip_num;
-	for (int i = 0; i < cs->ip_num; i++) {
+	for (i = 0; i < cs->ip_num; i++) {
 		hash ^= wuy_dict_hash_pointer((void *)cs->ips[i]);
 	}
 	return hash;
@@ -118,9 +119,10 @@ static int leak_callstack_cmp(const void *a, const void *b)
 
 static void leak_callstack_print(struct leak_callstack *cs)
 {
+	int i = 0;
 	char **symbols = backtrace_symbols(cs->ips, cs->ip_num);
 
-	for (int i = 2; i < cs->ip_num; i++) {
+	for (i = 2; i < cs->ip_num; i++) {
 		fprintf(leak_log_filp, "    %s\n", symbols[i]);
 	}
 
@@ -181,6 +183,7 @@ static void leak_report(void)
 	struct leak_callstack *callstacks[wuy_dict_count(leak_callstack_dict)];
 
 	int count = 0;
+	int i = 0;
 	wuy_dict_node_t *node;
 	wuy_dict_iter(leak_callstack_dict, node) {
 		struct leak_callstack *cs = wuy_containerof(node,
@@ -195,7 +198,7 @@ static void leak_report(void)
 
 	time_t now = time(NULL);
 
-	for (int i = 0; i < count; i++) {
+	for (i = 0; i < count; i++) {
 		struct leak_callstack *cs = callstacks[i];
 
 		time_t unfree_max = 0;
