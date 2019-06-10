@@ -574,6 +574,10 @@ void *malloc(size_t size)
 
 void free(void *p)
 {
+	if (p == NULL) {
+		return;
+	}
+
 	if (tmp_free(p)) {
 		return;
 	}
