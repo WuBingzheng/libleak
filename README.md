@@ -45,6 +45,8 @@ GPLv2
 
 3. Then you will read output in `/tmp/libleak.$pid` in time.
 
+4. If some symbol names are absent in the output, try to compile your program with `-rdynamic` GCC flag.
+
 ### set expire threshold
 
 As said above, you should set expire threshold according to your scenarios.
