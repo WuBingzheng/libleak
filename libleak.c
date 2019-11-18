@@ -205,9 +205,9 @@ static void leak_report(void)
 				struct leak_memblock, list_node);
 			unfree_max = now - mb->create;
 		}
-		fprintf(leak_log_filp, "callstack[%d]: may-leak=%d (%ld bytes)\n"
-                                "    expired=%d (%ld bytes), free_expired=%d (%ld bytes)\n"
-                                "    alloc=%d (%ld bytes), free=%d (%ld bytes)\n"
+		fprintf(leak_log_filp, "callstack[%d]: may-leak=%d (%zu bytes)\n"
+                                "    expired=%d (%zu bytes), free_expired=%d (%zu bytes)\n"
+                                "    alloc=%d (%zu bytes), free=%d (%zu bytes)\n"
                                 "    freed memory live time: min=%ld max=%ld average=%ld\n"
                                 "    un-freed memory live time: max=%ld\n",
                                 cs->id,
@@ -319,7 +319,7 @@ static void leak_expire(void)
 		wuy_list_append(&cs->expired_list, &mb->list_node);
 		pthread_mutex_unlock(&cs->mutex);
 
-		fprintf(leak_log_filp, "callstack[%d] expires. count=%d size=%ld/%ld alloc=%d free=%d\n",
+		fprintf(leak_log_filp, "callstack[%d] expires. count=%d size=%zu/%zu alloc=%d free=%d\n",
 				cs->id, cs->expired_count, mb->size, cs->expired_size,
 				cs->alloc_count, cs->free_count);
 
