@@ -105,3 +105,68 @@ The log file is set by `LEAK_LOG_FILE` (default is `/tmp/libleak.$pid`).
 
 There is also a statistics report when disabled or target normal termination,
 either via exit(3) or via return from the main().
+
+
+# READ LOG
+
+After the program running, you can check the output log (e.g. by `tail -f /tmp/libleak.$pid`).
+
+The memory blocks that live longer than the threshold will be printed as:
+
+    callstack[1] expires. count=1 size=1024/1024 alloc=1 free=0
+        0x00007fd322bd8220  libc-2.17.so  malloc()+0
+        0x000000000040084e  test  foo()+14  foo.c:12
+        0x0000000000400875  test  bar()+37  bar.c:20
+        0x0000000000400acb  test  main()+364  test.c:80
+
+`callstack[1]` is the ID of callstack where memory leak happens.
+
+The backtrace is showed only on the first time, while it only prints
+the ID and counters if expiring again:
+
+    callstack[1] expires. count=2 size=1024/2048 alloc=2 free=0
+
+If the expired memory block is freed later, it prints:
+
+    callstack[1] frees after expired. live=6 expired=1 free_expired=1
+
+Stop the output when you think there is enough log.
+You can stop the output by terminating the target process,
+or by by `LEAK_PID_FILE` and `LEAK_PID_CHECK` temporarily.
+
+After stopping, statistics is printed for the CallStacks with memory leak:
+
+    # callstack statistics: (in ascending order)
+
+    callstack[1]: may-leak=1 (1024 bytes)
+        expired=2 (2048 bytes), free_expired=1 (1024 bytes)
+        alloc=12 (12288 bytes), free=10 (10240 bytes)
+        freed memory live time: min=1 max=5 average=4
+        un-freed memory live time: max=13
+    callstack[4]: may-leak=4 (32 bytes)
+        expired=4 (32 bytes), free_expired=0 (0 bytes)
+        alloc=4 (32 bytes), free=0 (0 bytes)
+        freed memory live time: min=0 max=0 average=0
+        un-freed memory live time: max=7
+
+The statistics are straight:
+
+  - `may-leak`, equal to `expired - free_expired`,
+  - `expired`, count of memory blocks that live longer than threshold,
+  - `free_expired`, count of memory blocks that freed after expiration,
+  - `alloc`, total count of allocation,
+  - `free`, total count of free.
+
+The `may-leak` may be the most important one. All callstacks are sorted by this in ascending order.
+So you should check all callstacks backward.
+
+If a free is totally missed in your program, you should only check the callstacks with `free=0` .
+Otherwise, if memory leak only happens in some cases, you need to check all callstacks.
+
+When you find some suspicious callstack, go back to find its full backtrace by the ID, and check you code.
+
+`libleak` just try to give some help, while some inspiration is still need to find the memory leak finally.
+
+If memory pool is used in your program (e.g. `Nginx`), you must try harder to locate the memory leak.
+
+Good luck!
