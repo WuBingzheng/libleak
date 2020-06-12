@@ -115,11 +115,14 @@ The memory blocks that live longer than the threshold will be printed as:
 
     callstack[1] expires. count=1 size=1024/1024 alloc=1 free=0
         0x00007fd322bd8220  libc-2.17.so  malloc()+0
-        0x000000000040084e  test  foo()+14  foo.c:12
-        0x0000000000400875  test  bar()+37  bar.c:20
-        0x0000000000400acb  test  main()+364  test.c:80
+        0x000000000040084e  test  foo()+14
+        0x0000000000400875  test  bar()+37
+        0x0000000000400acb  test  main()+364
 
 `callstack[1]` is the ID of callstack where memory leak happens.
+
+It only prints addresses and function names, but not line numbers. Tool `addr2line(1)` can
+be used to transfer the addresses to line numbers.
 
 The backtrace is showed only on the first time, while it only prints
 the ID and counters if expiring again:
