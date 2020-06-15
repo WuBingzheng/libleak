@@ -45,8 +45,6 @@ GPLv2
 
 3. Then you will read output in `/tmp/libleak.$pid` in time.
 
-4. If some symbol names are absent in the output, try to compile your program with `-rdynamic` GCC flag.
-
 ### set expire threshold
 
 As said above, you should set expire threshold according to your scenarios.
@@ -88,6 +86,24 @@ To disable detecting process pid=1234:
 
     $ sed -i '/1234/d' /tmp/libleak.enabled
 
+### disable shared libraries calling
+
+If your program uses a shared library that allocates too much memory
+which ruins the log file, AND you can make sure that there is no leak in
+calling it, `LEAK_LIB_BLACKLIST` can be used to disable it.
+Library name can be got from `ldd $your-program`.
+If there are more than one libraries, use `,` to seperate them:
+
+    $ LD_PRELOAD=/path/of/libleak.so LEAK_LIB_BLACKLIST=libmysqlclient.so.20.3.8,librdkafka.so.1 ./a.out
+
+### skip initial phase
+
+Programs always allocate some memory in initial phase and do not free them.
+`LEAK_AFTER` can be used to skip this. If it's set, `libleak`
+starts to detect after this time (in second):
+
+    $ LD_PRELOAD=/path/of/libleak.so LEAK_AFTER=1 ./a.out
+
 ### for multi-thread program
 
 `libleak` is multi-thread safe.
@@ -114,15 +130,12 @@ After the program running, you can check the output log (e.g. by `tail -f /tmp/l
 The memory blocks that live longer than the threshold will be printed as:
 
     callstack[1] expires. count=1 size=1024/1024 alloc=1 free=0
-        0x00007fd322bd8220  libc-2.17.so  malloc()+0
-        0x000000000040084e  test  foo()+14
-        0x0000000000400875  test  bar()+37
-        0x0000000000400acb  test  main()+364
+        0x00007fd322bd8220  libleak.so  /path/libleak/libleak.c:674  malloc()
+        0x000000000040084e  test  /path/test/test.c:30  foo()
+        0x0000000000400875  test  /path/test/test.c:60  bar()
+        0x0000000000400acb  test  /path/test/test.c:67  main()
 
 `callstack[1]` is the ID of callstack where memory leak happens.
-
-It only prints addresses and function names, but not line numbers. Tool `addr2line(1)` can
-be used to transfer the addresses to line numbers.
 
 The backtrace is showed only on the first time, while it only prints
 the ID and counters if expiring again:

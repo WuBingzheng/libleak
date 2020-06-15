@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 
-#include <execinfo.h>
+#include <backtrace.h>
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 /* libwuya */
@@ -36,6 +37,12 @@ static char *conf_pid_file = "/tmp/libleak.enabled";
 
 /* LEAK_LOG_FILE: log file name. */
 static char *conf_log_file = "/tmp/libleak";
+
+/* LEAK_LIB_BLACKLIST: blacklist of shared libraries, seperated by `,`. */
+static char *conf_lib_blacklist = NULL;
+
+/* LEAK_AFTER: start detect after this time (in second). */
+static long conf_start_ms = 0;
 
 
 /* ### hooking symbols */
@@ -69,7 +76,7 @@ struct leak_callstack {
 	pthread_mutex_t	mutex;
 
 	int		ip_num;
-	void		*ips[0];
+	uintptr_t	ips[0];
 };
 static wuy_dict_t *leak_callstack_dict;
 static pthread_mutex_t leak_callstack_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -90,6 +97,8 @@ static wuy_pool_t *leak_memblock_pool;
 static wuy_dict_t *leak_memblock_dict;
 static WUY_LIST(leak_memblock_list);
 static pthread_mutex_t leak_memblock_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+struct backtrace_state *btstate;
 
 
 static uint32_t leak_callstack_hash(const void *item)
@@ -116,18 +125,6 @@ static int leak_callstack_cmp(const void *a, const void *b)
 		- (csb->expired_count - csb->free_expired_count);
 }
 
-static void leak_callstack_print(struct leak_callstack *cs)
-{
-	char **symbols = backtrace_symbols(cs->ips, cs->ip_num);
-
-	for (int i = 2; i < cs->ip_num; i++) {
-		fprintf(leak_log_filp, "    %s\n", symbols[i]);
-	}
-
-	free(symbols);
-}
-
-
 static uint32_t leak_memblock_hash(const void *item)
 {
 	const struct leak_memblock *mb = item;
@@ -138,6 +135,55 @@ static bool leak_memblock_equal(const void *a, const void *b)
 	const struct leak_memblock *mba = a;
 	const struct leak_memblock *mbb = b;
 	return mba->address == mbb->address;
+}
+
+
+/* ### build library maps by reading /proc */
+struct lib_map {
+	const char	*name;
+	size_t 		start;
+	size_t 		end;
+	bool		enabled;
+};
+static struct lib_map lib_maps[100];
+static int lib_map_num = 0;
+
+static void lib_maps_build(void)
+{
+	char fname[100];
+	sprintf(fname, "/proc/%d/maps", getpid());
+	FILE *filp = fopen(fname, "r");
+
+	int ia, ib, ic, id;
+	size_t start, end;
+	char line[1024], path[1024], perms[5], deleted[100];
+	while (fgets(line, sizeof(line), filp) != NULL) {
+		int ret = sscanf(line, "%zx-%zx %s %x %x:%x %d %s %s",
+				&start, &end, perms, &ia, &ib, &ic, &id, path, deleted);
+		if (ret != 8 || perms[2] != 'x' || path[0] != '/') {
+			continue;
+		}
+
+		struct lib_map *lib = &lib_maps[lib_map_num++];
+		lib->name = strdup(strrchr(path, '/') + 1);
+		lib->start = start;
+		lib->end = end;
+		if (conf_lib_blacklist != NULL) {
+			lib->enabled = strstr(conf_lib_blacklist, lib->name) == NULL;
+		} else {
+			lib->enabled = true;
+		}
+	}
+}
+static const char *lib_maps_search(uintptr_t pc)
+{
+	for (int i = 0; i < lib_map_num; i++) {
+		struct lib_map *lib = &lib_maps[i];
+		if (pc >= lib->start && pc <= lib->end) {
+			return lib->enabled ? lib->name : NULL;
+		}
+	}
+	return "[unknown]";
 }
 
 
@@ -225,6 +271,12 @@ static void leak_report(void)
 
 
 /* ### module init */
+static long leak_now_ms(void)
+{
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
 static void __attribute__((constructor))init(void)
 {
 	/* read configs from environment variables */
@@ -247,6 +299,14 @@ static void __attribute__((constructor))init(void)
 	ev = getenv("LEAK_PID_FILE");
 	if (ev != NULL) {
 		conf_pid_file = strdup(ev);
+	}
+	ev = getenv("LEAK_LIB_BLACKLIST");
+	if (ev != NULL) {
+		conf_lib_blacklist = strdup(ev);
+	}
+	ev = getenv("LEAK_AFTER");
+	if (ev != NULL) {
+		conf_start_ms = leak_now_ms() + atoi(ev) * 1000;
 	}
 
 	/* hook symbols */
@@ -276,6 +336,12 @@ static void __attribute__((constructor))init(void)
 
 	leak_memblock_pool = wuy_pool_new_type(struct leak_memblock);
 
+	/* build shared library maps */
+	lib_maps_build();
+
+	/* init backtrace state */
+	btstate = backtrace_create_state(NULL, 1, NULL, NULL);
+
 	/* log file */
 	char log_fname[100];
 	sprintf(log_fname, "%s.%d", conf_log_file, getpid());
@@ -293,6 +359,26 @@ static void __attribute__((constructor))init(void)
 
 
 /* ### check, expire and log memory blocks */
+
+static int leak_backtrace_full_cb (void *data, uintptr_t pc,
+		const char *filename, int lineno,
+		const char *function)
+{
+	fprintf(leak_log_filp, "    0x%016zx  %s", pc, lib_maps_search(pc));
+	if (filename != NULL || function != NULL) {
+		fprintf(leak_log_filp, "  %s:%d  %s()\n", filename, lineno, function);
+	} else {
+		fprintf(leak_log_filp, "\n");
+	}
+	return 0;
+}
+static void leak_callstack_print(struct leak_callstack *cs)
+{
+	for (int i = 0; i < cs->ip_num; i++) {
+		backtrace_pcinfo(btstate, cs->ips[i], leak_backtrace_full_cb, NULL, NULL);
+	}
+}
+
 static void leak_expire(void)
 {
 	time_t now = time(NULL);
@@ -383,14 +469,27 @@ static bool leak_enabled_check(void)
 }
 
 
+static int leak_backtrace_simple_cb(void *data, uintptr_t pc)
+{
+	if (pc == (uintptr_t)-1) {
+		return 0;
+	}
+	if (conf_lib_blacklist != NULL && lib_maps_search(pc) == NULL) {
+		return 1;
+	}
+
+	struct leak_callstack *current = data;
+	current->ips[current->ip_num++] = pc;
+	return 0;
+}
+
 static struct leak_callstack *leak_current(void)
 {
 	static int leak_callstack_id = 1;
 
 	struct leak_callstack current[20];
-	current->ip_num = backtrace(current->ips, 100);
-
-	if (current->ip_num == 0) {
+	current->ip_num = 0;
+	if (backtrace_simple(btstate, 2, leak_backtrace_simple_cb, NULL, current) != 0) {
 		return NULL;
 	}
 
@@ -414,12 +513,23 @@ static struct leak_callstack *leak_current(void)
 	return cs;
 }
 
-static void leak_process_alloc(void *p, size_t size)
+static bool leak_do_skip(void)
 {
 	if (!leak_inited) {
-		return;
+		return true;
 	}
 	if (leak_in_process) {
+		return true;
+	}
+	if (conf_start_ms != 0 && leak_now_ms() < conf_start_ms) {
+		return true;
+	}
+	return false;
+}
+
+static void leak_process_alloc(void *p, size_t size)
+{
+	if (leak_do_skip()) {
 		return;
 	}
 	leak_in_process = true;
@@ -459,10 +569,7 @@ static void leak_process_alloc(void *p, size_t size)
 
 static void leak_process_free(void *p)
 {
-	if (!leak_inited) {
-		return;
-	}
-	if (leak_in_process) {
+	if (leak_do_skip()) {
 		return;
 	}
 	leak_in_process = true;
@@ -529,10 +636,7 @@ static void leak_process_free(void *p)
 
 static void leak_process_update(void *p, size_t size)
 {
-	if (!leak_inited) {
-		return;
-	}
-	if (leak_in_process) {
+	if (leak_do_skip()) {
 		return;
 	}
 	leak_in_process = true;

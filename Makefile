@@ -3,7 +3,7 @@ LDFLAGS = -Llibwuya
 
 libleak.so: libleak.o
 	CFLAGS='-fPIC' make -C libwuya
-	$(CC) -shared -o $@ $^ $(LDFLAGS) -lwuya -lpthread -ldl
+	$(CC) -shared -o $@ $^ $(LDFLAGS) -lwuya -lpthread -ldl -lbacktrace
 
 clean:
 	rm -f libleak.so *.o
