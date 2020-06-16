@@ -174,6 +174,8 @@ static void lib_maps_build(void)
 			lib->enabled = true;
 		}
 	}
+
+	fclose(filp);
 }
 static const char *lib_maps_search(uintptr_t pc)
 {
@@ -189,7 +191,7 @@ static const char *lib_maps_search(uintptr_t pc)
 
 /* ### a simple memory allocation used before init() */
 
-static uint8_t tmp_buffer[1024 * 1024]; /* increase this if need */
+static uint8_t tmp_buffer[10 * 1024 * 1024]; /* increase this if need */
 static uint8_t *tmp_buf_pos = tmp_buffer;
 static void *tmp_malloc(size_t size)
 {
@@ -309,22 +311,6 @@ static void __attribute__((constructor))init(void)
 		conf_start_ms = leak_now_ms() + atoi(ev) * 1000;
 	}
 
-	/* hook symbols */
-	leak_real_malloc = dlsym(RTLD_NEXT, "malloc");
-	assert(leak_real_malloc != NULL);
-
-	leak_real_realloc = dlsym(RTLD_NEXT, "realloc");
-	assert(leak_real_realloc != NULL);
-
-	leak_real_calloc = dlsym(RTLD_NEXT, "calloc");
-	assert(leak_real_calloc != NULL);
-
-	leak_real_free = dlsym(RTLD_NEXT, "free");
-	assert(leak_real_free != NULL);
-
-	leak_real_fork = dlsym(RTLD_NEXT, "fork");
-	assert(leak_real_fork != NULL);
-
 	/* init dict and memory pool */
 	leak_callstack_dict = wuy_dict_new_func(leak_callstack_hash,
 			leak_callstack_equal,
@@ -341,6 +327,22 @@ static void __attribute__((constructor))init(void)
 
 	/* init backtrace state */
 	btstate = backtrace_create_state(NULL, 1, NULL, NULL);
+
+	/* hook symbols */
+	leak_real_malloc = dlsym(RTLD_NEXT, "malloc");
+	assert(leak_real_malloc != NULL);
+
+	leak_real_realloc = dlsym(RTLD_NEXT, "realloc");
+	assert(leak_real_realloc != NULL);
+
+	leak_real_calloc = dlsym(RTLD_NEXT, "calloc");
+	assert(leak_real_calloc != NULL);
+
+	leak_real_free = dlsym(RTLD_NEXT, "free");
+	assert(leak_real_free != NULL);
+
+	leak_real_fork = dlsym(RTLD_NEXT, "fork");
+	assert(leak_real_fork != NULL);
 
 	/* log file */
 	char log_fname[100];
