@@ -145,7 +145,7 @@ struct lib_map {
 	size_t 		end;
 	bool		enabled;
 };
-static struct lib_map lib_maps[100];
+static struct lib_map *lib_maps = NULL;
 static int lib_map_num = 0;
 
 static void lib_maps_build(void)
@@ -164,8 +164,15 @@ static void lib_maps_build(void)
 			continue;
 		}
 
+		lib_maps = (struct lib_map *)realloc(lib_maps, (lib_map_num + 1) * sizeof(struct lib_map));
 		struct lib_map *lib = &lib_maps[lib_map_num++];
-		lib->name = strdup(strrchr(path, '/') + 1);
+
+		char *slash = strrchr(path, '/');
+		if (slash)
+			slash++;
+		else
+			slash = path;
+		lib->name = strdup(slash);
 		lib->start = start;
 		lib->end = end;
 		if (conf_lib_blacklist != NULL) {
