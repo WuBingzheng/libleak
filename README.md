@@ -32,18 +32,21 @@ GPLv2
     $ cd libleak
     $ make
 
-
 # USAGE
 
 ### basic
 
 1. [Download](https://github.com/WuBingzheng/libleak/releases) or build the shared-object `libleak.so`.
 
-2. Run the target program:
+2. change the permission: $ chmod a+x libleak.so
+
+3. touch the output file: $ touch ./a.out
+
+4. Run the target program:
 
         $ LD_PRELOAD=/path/of/libleak.so ./a.out
 
-3. Then you will read output in `/tmp/libleak.$pid` in time.
+5. Then you will read output in `/tmp/libleak.$pid` in time.
 
 ### set expire threshold
 
