@@ -145,7 +145,7 @@ struct lib_map {
 	size_t 		end;
 	bool		enabled;
 };
-static struct lib_map lib_maps[100];
+static struct lib_map lib_maps[1000];
 static int lib_map_num = 0;
 
 static void lib_maps_build(void)
