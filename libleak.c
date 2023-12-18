@@ -434,8 +434,17 @@ static bool leak_enabled_check(void)
 
 	static time_t last_check;
 
+	static pthread_mutex_t leak_check_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+	static pid_t pid_self = 0;
+
 	time_t now = time(NULL);
 	if (now - last_check < conf_pid_check) {
+		return leak_enabled;
+	}
+
+	if (pthread_mutex_trylock(&leak_check_mutex) != 0) {
+		// another thread is already updating the value.
 		return leak_enabled;
 	}
 
@@ -443,27 +452,32 @@ static bool leak_enabled_check(void)
 
 	FILE *fp = fopen(conf_pid_file, "r");
 	if (fp == NULL) {
+		pthread_mutex_unlock(&leak_check_mutex);
 		return leak_enabled;
 	}
 
-	bool old = leak_enabled;
-	leak_enabled = false; /* disable if the pid is not found in file later */
+	bool old_enabled = leak_enabled;
+	bool new_enabled = false; /* disable if the pid is not found in file later */
 
-	pid_t pid_enabled, pid_self = getpid();
+	if (pid_self == 0)
+		pid_self = getpid();
+	pid_t pid_enabled;
 	while (fscanf(fp, "%d", &pid_enabled) == 1) {
 		if (pid_enabled == pid_self) {
-			leak_enabled = true; /* enable! */
+			new_enabled = true; /* enable! */
 			break;
 		}
 	}
+	leak_enabled = new_enabled;
+	pthread_mutex_unlock(&leak_check_mutex);
 	fclose(fp);
 
-	if (old ^ leak_enabled) {
-		if (!leak_enabled) {
+	if (old_enabled ^ new_enabled) {
+		if (!new_enabled) {
 			leak_report();
 		}
 
-		fprintf(leak_log_filp, "# switch %s.\n", leak_enabled ? "enabled" : "disabled");
+		fprintf(leak_log_filp, "# switch %s (at %lu).\n", new_enabled ? "enabled" : "disabled", now);
 		fflush(leak_log_filp);
 	}
 
