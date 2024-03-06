@@ -1,0 +1,8 @@
+!.gitignore
+
+#### Files to be ignored
+# Build products
+*.o
+# Final binaries
+*.elf
+*.so
