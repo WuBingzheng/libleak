@@ -6,4 +6,5 @@ libleak.so: libleak.o
 	$(CC) -shared -o $@ $^ $(LDFLAGS) -lwuya -lpthread -ldl -lbacktrace
 
 clean:
+	make -C libwuya clean
 	rm -f libleak.so *.o
